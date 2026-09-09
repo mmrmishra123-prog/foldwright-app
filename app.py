@@ -87,10 +87,13 @@ st.markdown("""
     border: none;
     border-bottom: 2px solid #C9C2AC;
     border-radius: 0;
-    color: var(--ink);
+    color: #FFFFFF !important;
     font-family: 'Space Grotesk', sans-serif;
     font-size: 1.15rem;
     padding: 0.5rem 0.1rem;
+} .stTextInput > div > div > input::placeholder {
+    color: #C9C2AC;
+    opacity: 1;
 }
 .stTextInput > div > div > input:focus {
     border-bottom: 2px solid var(--glow);
