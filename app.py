@@ -2,6 +2,7 @@ import streamlit as st
 from neo4j import GraphDatabase
 import google.generativeai as genai
 from google.api_core.exceptions import ResourceExhausted, TooManyRequests
+from concurrent.futures import ThreadPoolExecutor
 import time
 import json
 
@@ -91,7 +92,8 @@ st.markdown("""
     font-family: 'Space Grotesk', sans-serif;
     font-size: 1.15rem;
     padding: 0.5rem 0.1rem;
-} .stTextInput > div > div > input::placeholder {
+}
+.stTextInput > div > div > input::placeholder {
     color: #C9C2AC;
     opacity: 1;
 }
@@ -198,11 +200,13 @@ st.markdown("""
 # PIPELINE FUNCTIONS
 # ============================================================
 
-def generate_explanation(prompt, max_retries=5, base_delay=8):
+def generate_explanation(prompt, max_retries=3, base_delay=2):
+    """Rate-limit-safe wrapper around Gemini. Lighter retry/delay now that
+    the project is on a tier 1 (paid) quota rather than the 20/day free tier."""
     for attempt in range(max_retries):
         try:
             response = model.generate_content(prompt)
-            time.sleep(3)
+            time.sleep(0.3)  # light spacing, mostly redundant at tier 1 but kept as a safety margin
             return response.text
         except (ResourceExhausted, TooManyRequests):
             wait = base_delay * (2 ** attempt)
@@ -284,24 +288,34 @@ def get_full_context(driver, db_name, candidates):
     return enriched
 
 
-def generate_all_explanations(candidates):
-    for c in candidates:
-        has_source = c["context"] is not None and c["context"].get("source") is not None
-        if has_source:
-            prompt = f"""Mutation {c['notation']} at position {c['position']}.
+def _build_explanation_prompt(c):
+    has_source = c["context"] is not None and c["context"].get("source") is not None
+    if has_source:
+        return f"""Mutation {c['notation']} at position {c['position']}.
 Documented effect: {c['context'].get('effect_description')}
 Source: {c['context'].get('source')}
 ESM-2 score: {c['esm2']:.3f}, BLOSUM62: {c['blosum62']:.3f}
 
 In 2-4 sentences, explain why this mutation might help, using ONLY the facts above. Reference the documented source."""
-        else:
-            cons = c.get('conservation')
-            cons_str = f"{cons:.3f}" if cons is not None else "not available"
-            prompt = f"""Mutation {c['notation']} at position {c['position']} has no documented literature source.
+    else:
+        cons = c.get('conservation')
+        cons_str = f"{cons:.3f}" if cons is not None else "not available"
+        return f"""Mutation {c['notation']} at position {c['position']} has no documented literature source.
 ESM-2 score: {c['esm2']:.3f}, BLOSUM62: {c['blosum62']:.3f}, Conservation: {cons_str}
 
 In 2-4 sentences, explain what these scores suggest, being explicit that this is a model-based prediction, not a documented result."""
-        c["explanation"] = generate_explanation(prompt)
+
+
+def generate_all_explanations(candidates):
+    """Runs all explanation calls concurrently instead of one at a time.
+    Independent candidates don't need to wait on each other, so this turns
+    ~8 sequential round trips into ~1 round trip's worth of wall-clock time."""
+    prompts = [_build_explanation_prompt(c) for c in candidates]
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        explanations = list(executor.map(generate_explanation, prompts))
+
+    for c, exp in zip(candidates, explanations):
+        c["explanation"] = exp
     return candidates
 
 
